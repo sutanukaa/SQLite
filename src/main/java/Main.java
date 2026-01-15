@@ -24,11 +24,20 @@ public class Main {
           short pageSizeSigned = ByteBuffer.wrap(pageSizeBytes).getShort();
           int pageSize = Short.toUnsignedInt(pageSizeSigned);
 
-          // You can use print statements as follows for debugging, they'll be visible when running tests.
-          System.err.println("Logs from your program will appear here!");
+          // Skip to the page header (at offset 100, after the 100-byte file header)
+          // We've already read 18 bytes (16 skipped + 2 for page size), so skip 82 more
+          databaseFile.skip(82);
+          
+          // Skip the first 3 bytes of the page header (page type + first freeblock offset)
+          databaseFile.skip(3);
+          
+          // Read the 2-byte cell count (number of tables)
+          byte[] cellCountBytes = new byte[2];
+          databaseFile.read(cellCountBytes);
+          int numberOfTables = Short.toUnsignedInt(ByteBuffer.wrap(cellCountBytes).getShort());
 
-          // TODO: Uncomment the code below to pass the first stage
           System.out.println("database page size: " + pageSize);
+          System.out.println("number of tables: " + numberOfTables);
         } catch (IOException e) {
           System.out.println("Error reading file: " + e.getMessage());
         }
