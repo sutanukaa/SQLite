@@ -28,7 +28,7 @@ public class Main {
           System.err.println("Logs from your program will appear here!");
 
           // TODO: Uncomment the code below to pass the first stage
-          // System.out.println("database page size: " + pageSize);
+          System.out.println("database page size: " + pageSize);
         } catch (IOException e) {
           System.out.println("Error reading file: " + e.getMessage());
         }
