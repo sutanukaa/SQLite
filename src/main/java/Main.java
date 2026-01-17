@@ -38,20 +38,59 @@ public class Main {
         String tableName = matcher.group(1);
 
         // Find the table's root page from sqlite_schema
-        int rootPage = findTableRootPage(file, pageSize, tableName);
-        if (rootPage == -1) {
+        TableInfo tableInfo = findTableInfo(file, pageSize, tableName);
+        if (tableInfo == null) {
           System.out.println("Table not found: " + tableName);
           return;
         }
 
         // Count cells on the root page
-        int rowCount = countCellsOnPage(file, pageSize, rootPage);
+        int rowCount = countCellsOnPage(file, pageSize, tableInfo.rootPage);
         System.out.println(rowCount);
+      } else if (command.toUpperCase().startsWith("SELECT")) {
+        // Parse SELECT column FROM table
+        Pattern pattern = Pattern.compile("SELECT\\s+([\\w,\\s]+)\\s+FROM\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
+        Matcher matcher = pattern.matcher(command);
+        if (!matcher.find()) {
+          System.out.println("Invalid SQL command");
+          return;
+        }
+        String columnName = matcher.group(1).trim();
+        String tableName = matcher.group(2).trim();
+
+        // Find the table info from sqlite_schema
+        TableInfo tableInfo = findTableInfo(file, pageSize, tableName);
+        if (tableInfo == null) {
+          System.out.println("Table not found: " + tableName);
+          return;
+        }
+
+        // Parse CREATE TABLE to find column index
+        int columnIndex = findColumnIndex(tableInfo.sql, columnName);
+        if (columnIndex == -1) {
+          System.out.println("Column not found: " + columnName);
+          return;
+        }
+
+        // Read all rows and extract the column value
+        List<String> values = readColumnValues(file, pageSize, tableInfo.rootPage, columnIndex);
+        for (String value : values) {
+          System.out.println(value);
+        }
       } else {
         System.out.println("Missing or invalid command passed: " + command);
       }
     } catch (IOException e) {
       System.out.println("Error reading file: " + e.getMessage());
+    }
+  }
+
+  static class TableInfo {
+    int rootPage;
+    String sql;
+    TableInfo(int rootPage, String sql) {
+      this.rootPage = rootPage;
+      this.sql = sql;
     }
   }
 
@@ -89,7 +128,28 @@ public class Main {
     return new long[]{result, bytesRead};
   }
 
-  private static int findTableRootPage(RandomAccessFile file, int pageSize, String tableName) throws IOException {
+  private static int findColumnIndex(String createSql, String columnName) {
+    // Parse CREATE TABLE statement to find column index
+    // Format: CREATE TABLE tablename (col1 type, col2 type, ...)
+    Pattern pattern = Pattern.compile("\\((.+)\\)", Pattern.DOTALL);
+    Matcher matcher = pattern.matcher(createSql);
+    if (!matcher.find()) return -1;
+
+    String columnsDef = matcher.group(1);
+    String[] columns = columnsDef.split(",");
+    
+    for (int i = 0; i < columns.length; i++) {
+      String col = columns[i].trim();
+      // Get the column name (first word)
+      String[] parts = col.split("\\s+");
+      if (parts.length > 0 && parts[0].equalsIgnoreCase(columnName)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static TableInfo findTableInfo(RandomAccessFile file, int pageSize, String tableName) throws IOException {
     // Page 1 starts at offset 0, but has 100-byte file header
     long pageOffset = 0;
     int headerOffset = 100; // Skip file header for page 1
@@ -142,12 +202,13 @@ public class Main {
       file.seek(recordStart + headerSize);
 
       // sqlite_schema columns: type, name, tbl_name, rootpage, sql
-      // We need: type (0), name (1), rootpage (3)
+      // We need: type (0), name (1), rootpage (3), sql (4)
       String type = null;
       String name = null;
       int rootPage = 0;
+      String sql = null;
 
-      for (int col = 0; col < serialTypes.size() && col <= 3; col++) {
+      for (int col = 0; col < serialTypes.size(); col++) {
         long serialType = serialTypes.get(col);
         
         if (serialType == 0) {
@@ -170,6 +231,7 @@ public class Main {
           String strValue = new String(strBytes);
           if (col == 0) type = strValue;
           else if (col == 1) name = strValue;
+          else if (col == 4) sql = strValue;
         } else if (serialType >= 12 && serialType % 2 == 0) {
           // Blob - skip
           int blobLen = (int) ((serialType - 12) / 2);
@@ -178,10 +240,126 @@ public class Main {
       }
 
       if ("table".equals(type) && tableName.equalsIgnoreCase(name)) {
-        return rootPage;
+        return new TableInfo(rootPage, sql);
       }
     }
-    return -1;
+    return null;
+  }
+
+  private static List<String> readColumnValues(RandomAccessFile file, int pageSize, int pageNumber, int targetColumnIndex) throws IOException {
+    List<String> values = new ArrayList<>();
+    
+    // Pages are 1-indexed, so page N starts at offset (N-1) * pageSize
+    long pageOffset = (long) (pageNumber - 1) * pageSize;
+    
+    // Page 1 has 100-byte file header, other pages don't
+    int headerOffset = (pageNumber == 1) ? 100 : 0;
+
+    // Read page header
+    file.seek(pageOffset + headerOffset);
+    int pageType = file.read();
+    file.skipBytes(2); // first freeblock
+    int cellCount = file.readUnsignedShort();
+    file.skipBytes(3); // cell content start + fragmented free bytes
+
+    // For interior pages, skip the right-most pointer (4 bytes)
+    if (pageType == 0x05 || pageType == 0x02) {
+      file.skipBytes(4);
+    }
+
+    // Read cell pointer array
+    int[] cellPointers = new int[cellCount];
+    for (int i = 0; i < cellCount; i++) {
+      cellPointers[i] = file.readUnsignedShort();
+    }
+
+    // Parse each cell
+    for (int i = 0; i < cellCount; i++) {
+      file.seek(pageOffset + cellPointers[i]);
+
+      // Read payload size (varint)
+      long[] payloadResult = readVarint(file);
+
+      // Read rowid (varint)
+      long[] rowidResult = readVarint(file);
+
+      // Read record header
+      long recordStart = file.getFilePointer();
+      long[] headerSizeResult = readVarint(file);
+      long headerSize = headerSizeResult[0];
+
+      // Read serial types from header
+      List<Long> serialTypes = new ArrayList<>();
+      long headerBytesRead = headerSizeResult[1];
+      while (headerBytesRead < headerSize) {
+        long[] serialResult = readVarint(file);
+        serialTypes.add(serialResult[0]);
+        headerBytesRead += serialResult[1];
+      }
+
+      // Position at start of column values
+      file.seek(recordStart + headerSize);
+
+      // Read column values until we reach the target column
+      String targetValue = null;
+      for (int col = 0; col < serialTypes.size(); col++) {
+        long serialType = serialTypes.get(col);
+        
+        if (serialType == 0) {
+          // NULL
+          if (col == targetColumnIndex) targetValue = "";
+        } else if (serialType >= 1 && serialType <= 6) {
+          // Integer
+          int intSize = serialType == 1 ? 1 : serialType == 2 ? 2 : serialType == 3 ? 3 : 
+                        serialType == 4 ? 4 : serialType == 5 ? 6 : 8;
+          long value = 0;
+          for (int b = 0; b < intSize; b++) {
+            value = (value << 8) | file.read();
+          }
+          if (col == targetColumnIndex) targetValue = String.valueOf(value);
+        } else if (serialType == 7) {
+          // Float (8 bytes)
+          byte[] floatBytes = new byte[8];
+          file.readFully(floatBytes);
+          if (col == targetColumnIndex) {
+            double d = ByteBuffer.wrap(floatBytes).getDouble();
+            targetValue = String.valueOf(d);
+          }
+        } else if (serialType == 8) {
+          // Integer 0
+          if (col == targetColumnIndex) targetValue = "0";
+        } else if (serialType == 9) {
+          // Integer 1
+          if (col == targetColumnIndex) targetValue = "1";
+        } else if (serialType >= 12 && serialType % 2 == 0) {
+          // Blob
+          int blobLen = (int) ((serialType - 12) / 2);
+          if (col == targetColumnIndex) {
+            byte[] blobBytes = new byte[blobLen];
+            file.readFully(blobBytes);
+            targetValue = new String(blobBytes);
+          } else {
+            file.skipBytes(blobLen);
+          }
+        } else if (serialType >= 13 && serialType % 2 == 1) {
+          // Text
+          int strLen = (int) ((serialType - 13) / 2);
+          if (col == targetColumnIndex) {
+            byte[] strBytes = new byte[strLen];
+            file.readFully(strBytes);
+            targetValue = new String(strBytes);
+          } else {
+            file.skipBytes(strLen);
+          }
+        }
+      }
+      
+      if (targetValue != null) {
+        values.add(targetValue);
+      }
+    }
+
+    return values;
   }
 
   private static int countCellsOnPage(RandomAccessFile file, int pageSize, int pageNumber) throws IOException {
