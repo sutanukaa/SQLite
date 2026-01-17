@@ -48,8 +48,8 @@ public class Main {
         int rowCount = countCellsOnPage(file, pageSize, tableInfo.rootPage);
         System.out.println(rowCount);
       } else if (command.toUpperCase().startsWith("SELECT")) {
-        // Parse SELECT columns FROM table
-        Pattern pattern = Pattern.compile("SELECT\\s+([\\w,\\s]+)\\s+FROM\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
+        // Parse SELECT columns FROM table [WHERE column = 'value']
+        Pattern pattern = Pattern.compile("SELECT\\s+([\\w,\\s]+)\\s+FROM\\s+(\\w+)(?:\\s+WHERE\\s+(\\w+)\\s*=\\s*'([^']*)')?", Pattern.CASE_INSENSITIVE);
         Matcher matcher = pattern.matcher(command);
         if (!matcher.find()) {
           System.out.println("Invalid SQL command");
@@ -57,6 +57,8 @@ public class Main {
         }
         String columnsStr = matcher.group(1).trim();
         String tableName = matcher.group(2).trim();
+        String whereColumn = matcher.group(3);
+        String whereValue = matcher.group(4);
 
         // Find the table info from sqlite_schema
         TableInfo tableInfo = findTableInfo(file, pageSize, tableName);
@@ -76,8 +78,18 @@ public class Main {
           }
         }
 
+        // Parse WHERE clause if present
+        int whereColumnIndex = -1;
+        if (whereColumn != null) {
+          whereColumnIndex = findColumnIndex(tableInfo.sql, whereColumn);
+          if (whereColumnIndex == -1) {
+            System.out.println("Column not found: " + whereColumn);
+            return;
+          }
+        }
+
         // Read all rows and extract the column values
-        List<String[]> rows = readColumnValues(file, pageSize, tableInfo.rootPage, columnIndices);
+        List<String[]> rows = readColumnValues(file, pageSize, tableInfo.rootPage, columnIndices, whereColumnIndex, whereValue);
         for (String[] row : rows) {
           System.out.println(String.join("|", row));
         }
@@ -250,7 +262,7 @@ public class Main {
     return null;
   }
 
-  private static List<String[]> readColumnValues(RandomAccessFile file, int pageSize, int pageNumber, int[] targetColumnIndices) throws IOException {
+  private static List<String[]> readColumnValues(RandomAccessFile file, int pageSize, int pageNumber, int[] targetColumnIndices, int whereColumnIndex, String whereValue) throws IOException {
     List<String[]> rows = new ArrayList<>();
     
     // Pages are 1-indexed, so page N starts at offset (N-1) * pageSize
@@ -345,6 +357,13 @@ public class Main {
           byte[] strBytes = new byte[strLen];
           file.readFully(strBytes);
           columnValues[col] = new String(strBytes);
+        }
+      }
+      
+      // Apply WHERE filter if present
+      if (whereColumnIndex >= 0 && whereValue != null) {
+        if (!columnValues[whereColumnIndex].equals(whereValue)) {
+          continue; // Skip this row
         }
       }
       
