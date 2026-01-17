@@ -278,11 +278,36 @@ public class Main {
     int cellCount = file.readUnsignedShort();
     file.skipBytes(3); // cell content start + fragmented free bytes
 
-    // For interior pages, skip the right-most pointer (4 bytes)
-    if (pageType == 0x05 || pageType == 0x02) {
-      file.skipBytes(4);
+    // For interior pages (0x05), we need to traverse child pages
+    if (pageType == 0x05) {
+      // Read the right-most pointer (4 bytes)
+      int rightMostChild = file.readInt();
+      
+      // Read cell pointer array
+      int[] cellPointers = new int[cellCount];
+      for (int i = 0; i < cellCount; i++) {
+        cellPointers[i] = file.readUnsignedShort();
+      }
+      
+      // Each cell in an interior page contains: left child pointer (4 bytes) + rowid (varint)
+      List<Integer> childPages = new ArrayList<>();
+      for (int i = 0; i < cellCount; i++) {
+        file.seek(pageOffset + cellPointers[i]);
+        int leftChild = file.readInt();
+        childPages.add(leftChild);
+      }
+      // Add the right-most child
+      childPages.add(rightMostChild);
+      
+      // Recursively read from all child pages
+      for (int childPage : childPages) {
+        rows.addAll(readColumnValues(file, pageSize, childPage, targetColumnIndices, whereColumnIndex, whereValue));
+      }
+      
+      return rows;
     }
 
+    // For leaf pages (0x0D), read the actual data
     // Read cell pointer array
     int[] cellPointers = new int[cellCount];
     for (int i = 0; i < cellCount; i++) {
