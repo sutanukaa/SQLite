@@ -48,14 +48,14 @@ public class Main {
         int rowCount = countCellsOnPage(file, pageSize, tableInfo.rootPage);
         System.out.println(rowCount);
       } else if (command.toUpperCase().startsWith("SELECT")) {
-        // Parse SELECT column FROM table
+        // Parse SELECT columns FROM table
         Pattern pattern = Pattern.compile("SELECT\\s+([\\w,\\s]+)\\s+FROM\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
         Matcher matcher = pattern.matcher(command);
         if (!matcher.find()) {
           System.out.println("Invalid SQL command");
           return;
         }
-        String columnName = matcher.group(1).trim();
+        String columnsStr = matcher.group(1).trim();
         String tableName = matcher.group(2).trim();
 
         // Find the table info from sqlite_schema
@@ -65,17 +65,21 @@ public class Main {
           return;
         }
 
-        // Parse CREATE TABLE to find column index
-        int columnIndex = findColumnIndex(tableInfo.sql, columnName);
-        if (columnIndex == -1) {
-          System.out.println("Column not found: " + columnName);
-          return;
+        // Parse column names and find their indices
+        String[] columnNames = columnsStr.split("\\s*,\\s*");
+        int[] columnIndices = new int[columnNames.length];
+        for (int i = 0; i < columnNames.length; i++) {
+          columnIndices[i] = findColumnIndex(tableInfo.sql, columnNames[i].trim());
+          if (columnIndices[i] == -1) {
+            System.out.println("Column not found: " + columnNames[i]);
+            return;
+          }
         }
 
-        // Read all rows and extract the column value
-        List<String> values = readColumnValues(file, pageSize, tableInfo.rootPage, columnIndex);
-        for (String value : values) {
-          System.out.println(value);
+        // Read all rows and extract the column values
+        List<String[]> rows = readColumnValues(file, pageSize, tableInfo.rootPage, columnIndices);
+        for (String[] row : rows) {
+          System.out.println(String.join("|", row));
         }
       } else {
         System.out.println("Missing or invalid command passed: " + command);
@@ -246,8 +250,8 @@ public class Main {
     return null;
   }
 
-  private static List<String> readColumnValues(RandomAccessFile file, int pageSize, int pageNumber, int targetColumnIndex) throws IOException {
-    List<String> values = new ArrayList<>();
+  private static List<String[]> readColumnValues(RandomAccessFile file, int pageSize, int pageNumber, int[] targetColumnIndices) throws IOException {
+    List<String[]> rows = new ArrayList<>();
     
     // Pages are 1-indexed, so page N starts at offset (N-1) * pageSize
     long pageOffset = (long) (pageNumber - 1) * pageSize;
@@ -300,14 +304,14 @@ public class Main {
       // Position at start of column values
       file.seek(recordStart + headerSize);
 
-      // Read column values until we reach the target column
-      String targetValue = null;
+      // Read all column values
+      String[] columnValues = new String[serialTypes.size()];
       for (int col = 0; col < serialTypes.size(); col++) {
         long serialType = serialTypes.get(col);
         
         if (serialType == 0) {
           // NULL
-          if (col == targetColumnIndex) targetValue = "";
+          columnValues[col] = "";
         } else if (serialType >= 1 && serialType <= 6) {
           // Integer
           int intSize = serialType == 1 ? 1 : serialType == 2 ? 2 : serialType == 3 ? 3 : 
@@ -316,50 +320,43 @@ public class Main {
           for (int b = 0; b < intSize; b++) {
             value = (value << 8) | file.read();
           }
-          if (col == targetColumnIndex) targetValue = String.valueOf(value);
+          columnValues[col] = String.valueOf(value);
         } else if (serialType == 7) {
           // Float (8 bytes)
           byte[] floatBytes = new byte[8];
           file.readFully(floatBytes);
-          if (col == targetColumnIndex) {
-            double d = ByteBuffer.wrap(floatBytes).getDouble();
-            targetValue = String.valueOf(d);
-          }
+          double d = ByteBuffer.wrap(floatBytes).getDouble();
+          columnValues[col] = String.valueOf(d);
         } else if (serialType == 8) {
           // Integer 0
-          if (col == targetColumnIndex) targetValue = "0";
+          columnValues[col] = "0";
         } else if (serialType == 9) {
           // Integer 1
-          if (col == targetColumnIndex) targetValue = "1";
+          columnValues[col] = "1";
         } else if (serialType >= 12 && serialType % 2 == 0) {
           // Blob
           int blobLen = (int) ((serialType - 12) / 2);
-          if (col == targetColumnIndex) {
-            byte[] blobBytes = new byte[blobLen];
-            file.readFully(blobBytes);
-            targetValue = new String(blobBytes);
-          } else {
-            file.skipBytes(blobLen);
-          }
+          byte[] blobBytes = new byte[blobLen];
+          file.readFully(blobBytes);
+          columnValues[col] = new String(blobBytes);
         } else if (serialType >= 13 && serialType % 2 == 1) {
           // Text
           int strLen = (int) ((serialType - 13) / 2);
-          if (col == targetColumnIndex) {
-            byte[] strBytes = new byte[strLen];
-            file.readFully(strBytes);
-            targetValue = new String(strBytes);
-          } else {
-            file.skipBytes(strLen);
-          }
+          byte[] strBytes = new byte[strLen];
+          file.readFully(strBytes);
+          columnValues[col] = new String(strBytes);
         }
       }
       
-      if (targetValue != null) {
-        values.add(targetValue);
+      // Extract only the requested columns
+      String[] rowValues = new String[targetColumnIndices.length];
+      for (int j = 0; j < targetColumnIndices.length; j++) {
+        rowValues[j] = columnValues[targetColumnIndices[j]];
       }
+      rows.add(rowValues);
     }
 
-    return values;
+    return rows;
   }
 
   private static int countCellsOnPage(RandomAccessFile file, int pageSize, int pageNumber) throws IOException {
